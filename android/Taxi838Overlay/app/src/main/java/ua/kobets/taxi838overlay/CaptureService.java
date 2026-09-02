@@ -23,6 +23,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -35,7 +36,6 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -47,13 +47,15 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
     public static final String EXTRA_RESULT_CODE = "resultCode";
     public static final String EXTRA_RESULT_DATA = "resultData";
 
-    private static final String CHANNEL = "capture838";
-    private static final int NOTIFICATION_ID = 8382;
-    private static final long SCAN_PAUSE_MS = 650;
+    private static final String CHANNEL = "capture838_v3";
+    private static final int NOTIFICATION_ID = 8383;
+    private static final long SCAN_PAUSE_MS = 700;
+    private static final long KEEP_LAST_GOOD_MS = 2600;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private final AtomicBoolean ocrBusy = new AtomicBoolean(false);
     private final Runnable scanTick = this::scanTick;
+    private final List<Order> stableOrders = new ArrayList<>();
 
     private SharedPreferences prefs;
     private WindowManager wm;
@@ -65,6 +67,7 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
     private int captureWidth;
     private int captureHeight;
     private int densityDpi;
+    private long lastGoodAt = 0L;
 
     @Override
     public void onCreate() {
@@ -109,19 +112,23 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
             return START_NOT_STICKY;
         }
 
-        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager manager =
+                (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         projection = manager.getMediaProjection(resultCode, resultData);
         if (projection == null) {
             stopSelf();
             return START_NOT_STICKY;
         }
         projection.registerCallback(new MediaProjection.Callback() {
-            @Override public void onStop() { stopSelf(); }
+            @Override
+            public void onStop() {
+                stopSelf();
+            }
         }, main);
 
         createInitialCapture();
         main.removeCallbacks(scanTick);
-        main.postDelayed(scanTick, 450);
+        main.postDelayed(scanTick, 350);
         return START_NOT_STICKY;
     }
 
@@ -131,7 +138,11 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         captureHeight = size[1];
         densityDpi = getResources().getDisplayMetrics().densityDpi;
 
-        reader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
+        reader = ImageReader.newInstance(
+                captureWidth,
+                captureHeight,
+                PixelFormat.RGBA_8888,
+                2);
         virtualDisplay = projection.createVirtualDisplay(
                 "838ProfitCapture",
                 captureWidth,
@@ -151,11 +162,18 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         ImageReader old = reader;
         captureWidth = size[0];
         captureHeight = size[1];
-        reader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
+        reader = ImageReader.newInstance(
+                captureWidth,
+                captureHeight,
+                PixelFormat.RGBA_8888,
+                2);
         virtualDisplay.resize(captureWidth, captureHeight, densityDpi);
         virtualDisplay.setSurface(reader.getSurface());
         if (old != null) old.close();
-        overlay.setOrders(Collections.emptyList());
+
+        stableOrders.clear();
+        lastGoodAt = 0L;
+        overlay.setOrders(stableOrders);
         overlay.setVisibility(View.INVISIBLE);
     }
 
@@ -174,18 +192,17 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         resizeCaptureIfNeeded();
 
         if (!prefs.getBoolean(MainActivity.ENABLED, true)) {
-            overlay.setOrders(Collections.emptyList());
+            stableOrders.clear();
+            overlay.setOrders(stableOrders);
             overlay.setVisibility(View.INVISIBLE);
             main.postDelayed(scanTick, 900);
             return;
         }
         if (ocrBusy.get()) {
-            main.postDelayed(scanTick, 250);
+            main.postDelayed(scanTick, 220);
             return;
         }
-
-        overlay.setVisibility(View.INVISIBLE);
-        main.postDelayed(this::acquireAndRecognize, 80);
+        acquireAndRecognize();
     }
 
     private void acquireAndRecognize() {
@@ -196,40 +213,78 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
                 main.postDelayed(scanTick, 220);
                 return;
             }
-            Bitmap bitmap = imageToBitmap(image);
+            Bitmap captured = imageToBitmap(image);
             image.close();
             image = null;
-            if (bitmap == null) {
-                main.postDelayed(scanTick, 450);
+            if (captured == null) {
+                main.postDelayed(scanTick, 400);
                 return;
             }
 
+            Bitmap ocrBitmap = prepareForOcr(captured);
+            captured.recycle();
             ocrBusy.set(true);
-            recognizer.process(InputImage.fromBitmap(bitmap, 0))
-                    .addOnSuccessListener(result -> {
-                        List<Order> orders = Parser.parse(
-                                result,
-                                captureWidth,
-                                captureHeight,
-                                getResources().getDisplayMetrics().density);
-                        overlay.setOrders(orders);
-                        overlay.setVisibility(orders.isEmpty() ? View.INVISIBLE : View.VISIBLE);
-                    })
-                    .addOnFailureListener(e -> {
-                        overlay.setOrders(Collections.emptyList());
-                        overlay.setVisibility(View.INVISIBLE);
-                    })
+
+            recognizer.process(InputImage.fromBitmap(ocrBitmap, 0))
+                    .addOnSuccessListener(result -> applyOcrResult(result))
+                    .addOnFailureListener(e -> keepOrClearLastGood())
                     .addOnCompleteListener(task -> {
-                        bitmap.recycle();
+                        ocrBitmap.recycle();
                         ocrBusy.set(false);
                         main.postDelayed(scanTick, SCAN_PAUSE_MS);
                     });
         } catch (Throwable t) {
             if (image != null) image.close();
             ocrBusy.set(false);
-            overlay.setVisibility(View.INVISIBLE);
-            main.postDelayed(scanTick, 700);
+            keepOrClearLastGood();
+            main.postDelayed(scanTick, 650);
         }
+    }
+
+    private void applyOcrResult(Text result) {
+        List<Order> parsed = Parser.parse(
+                result,
+                captureWidth,
+                captureHeight,
+                getResources().getDisplayMetrics().density);
+
+        if (!parsed.isEmpty()) {
+            stableOrders.clear();
+            stableOrders.addAll(parsed);
+            lastGoodAt = SystemClock.elapsedRealtime();
+            overlay.setOrders(stableOrders);
+            overlay.setVisibility(View.VISIBLE);
+        } else {
+            keepOrClearLastGood();
+        }
+    }
+
+    private void keepOrClearLastGood() {
+        long now = SystemClock.elapsedRealtime();
+        if (!stableOrders.isEmpty() && now - lastGoodAt <= KEEP_LAST_GOOD_MS) {
+            overlay.setOrders(stableOrders);
+            overlay.setVisibility(View.VISIBLE);
+            return;
+        }
+        stableOrders.clear();
+        overlay.setOrders(stableOrders);
+        overlay.setVisibility(View.INVISIBLE);
+    }
+
+    private Bitmap prepareForOcr(Bitmap source) {
+        Bitmap work = source.copy(Bitmap.Config.ARGB_8888, true);
+        Canvas canvas = new Canvas(work);
+        Paint mask = new Paint();
+        mask.setColor(Color.WHITE);
+
+        int w = work.getWidth();
+        int h = work.getHeight();
+
+        // 838 places a hryvnia icon before the fare and a person icon before pickup km.
+        // Mask only those narrow icon columns so OCR does not turn them into an extra "2".
+        canvas.drawRect(w * 0.028f, 0, w * 0.083f, h, mask);
+        canvas.drawRect(w * 0.282f, 0, w * 0.338f, h, mask);
+        return work;
     }
 
     private Bitmap imageToBitmap(Image image) {
@@ -241,10 +296,19 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         int rowPadding = rowStride - pixelStride * captureWidth;
         int paddedWidth = captureWidth + Math.max(0, rowPadding / pixelStride);
 
-        Bitmap padded = Bitmap.createBitmap(paddedWidth, captureHeight, Bitmap.Config.ARGB_8888);
+        Bitmap padded = Bitmap.createBitmap(
+                paddedWidth,
+                captureHeight,
+                Bitmap.Config.ARGB_8888);
         padded.copyPixelsFromBuffer(buffer);
         if (paddedWidth == captureWidth) return padded;
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
+
+        Bitmap cropped = Bitmap.createBitmap(
+                padded,
+                0,
+                0,
+                captureWidth,
+                captureHeight);
         padded.recycle();
         return cropped;
     }
@@ -253,10 +317,13 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL,
-                    "838 Profit Overlay",
+                    "838: фоновий розрахунок",
                     NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("Фоновий аналіз заявок 838");
-            ((NotificationManager) getSystemService(NOTIFICATION_SERVICE)).createNotificationChannel(channel);
+            channel.setDescription("Фонове локальне зчитування заявок 838");
+            channel.setSound(null, null);
+            channel.enableVibration(false);
+            ((NotificationManager) getSystemService(NOTIFICATION_SERVICE))
+                    .createNotificationChannel(channel);
         }
     }
 
@@ -264,10 +331,11 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         Notification.Builder b = Build.VERSION.SDK_INT >= 26
                 ? new Notification.Builder(this, CHANNEL)
                 : new Notification.Builder(this);
-        return b.setContentTitle("838 Profit Overlay")
-                .setContentText("Аналіз заявок активний")
+        return b.setContentTitle("838: розрахунок активний")
+                .setContentText("Зчитую заявки локально")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
                 .build();
     }
 
@@ -294,7 +362,10 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         }
         if (recognizer != null) recognizer.close();
         if (wm != null && overlay != null) {
-            try { wm.removeView(overlay); } catch (Throwable ignored) {}
+            try {
+                wm.removeView(overlay);
+            } catch (Throwable ignored) {
+            }
         }
         super.onDestroy();
     }
@@ -327,7 +398,9 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
             this.bounds = new Rect(bounds);
         }
 
-        double totalKm() { return pickupKm + tripKm; }
+        double totalKm() {
+            return pickupKm + tripKm;
+        }
     }
 
     private static final class Result {
@@ -336,11 +409,13 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         double serviceCommission;
         double transferCommission;
         double amortization;
+        double fixedCost;
         double totalCost;
         double netProfit;
         double netPerKm;
         boolean incomplete;
         boolean acceptable;
+        boolean targetConfigured;
     }
 
     private static Result calculate(Order order, SharedPreferences p) {
@@ -359,11 +434,19 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         r.serviceCommission = order.fare * servicePct / 100.0;
         r.transferCommission = order.fare * transferPct / 100.0;
         r.amortization = r.totalKm * amortKm;
-        r.totalCost = r.fuelCost + r.serviceCommission + r.transferCommission + r.amortization + fixed;
+        r.fixedCost = fixed;
+        r.totalCost = r.fuelCost
+                + r.serviceCommission
+                + r.transferCommission
+                + r.amortization
+                + r.fixedCost;
         r.netProfit = order.fare - r.totalCost;
         r.netPerKm = r.totalKm > 0.001 ? r.netProfit / r.totalKm : 0.0;
         r.incomplete = fuelPrice <= 0 || consumption <= 0;
-        r.acceptable = !r.incomplete && r.netProfit >= minProfit && r.netPerKm >= minProfitKm;
+        r.targetConfigured = minProfit > 0 || minProfitKm > 0;
+        r.acceptable = !r.incomplete
+                && r.netProfit >= minProfit
+                && r.netPerKm >= minProfitKm;
         return r;
     }
 
@@ -378,79 +461,138 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
             this.box = new Rect(box);
         }
 
-        float cx() { return box.exactCenterX(); }
-        float cy() { return box.exactCenterY(); }
+        float cx() {
+            return box.exactCenterX();
+        }
+
+        float cy() {
+            return box.exactCenterY();
+        }
+    }
+
+    private static final class RowCandidate {
+        final Token fare;
+        final Token pickup;
+        final Token trip;
+        final int top;
+
+        RowCandidate(Token fare, Token pickup, Token trip, int top) {
+            this.fare = fare;
+            this.pickup = pickup;
+            this.trip = trip;
+            this.top = top;
+        }
     }
 
     private static final class Parser {
-        private static final Pattern NUMBER = Pattern.compile("(?<!\\d)(\\d{1,5}(?:[.,]\\d{1,2})?)(?!\\d)");
+        private static final Pattern NUMBER = Pattern.compile(
+                "(?<!\\d)(\\d{1,5}(?:[.,]\\d{1,2})?)(?!\\d)");
 
         static List<Order> parse(Text result, int screenW, int screenH, float density) {
-            List<Token> tokens = new ArrayList<>();
-            for (Text.TextBlock block : result.getTextBlocks()) {
-                for (Text.Line line : block.getLines()) {
-                    for (Text.Element element : line.getElements()) {
-                        Rect b = element.getBoundingBox();
-                        if (b == null) continue;
-                        Matcher m = NUMBER.matcher(element.getText());
-                        while (m.find()) {
-                            try {
-                                double value = Double.parseDouble(m.group(1).replace(',', '.'));
-                                tokens.add(new Token(element.getText(), value, b));
-                            } catch (Exception ignored) {}
-                        }
+            List<Token> tokens = collectTokens(result);
+            List<Token> fares = new ArrayList<>();
+            List<Token> pickups = new ArrayList<>();
+            List<Token> trips = new ArrayList<>();
+
+            for (Token t : tokens) {
+                float x = t.cx() / Math.max(1f, screenW);
+                float y = t.cy() / Math.max(1f, screenH);
+                if (y < 0.075f || y > 0.94f) continue;
+
+                if (x >= 0.065f && x <= 0.245f && t.value >= 20 && t.value <= 5000) {
+                    fares.add(t);
+                } else if (x >= 0.31f && x <= 0.60f && t.value > 0 && t.value < 200) {
+                    pickups.add(t);
+                } else if (x >= 0.59f && x <= 0.90f && t.value > 0 && t.value < 500) {
+                    trips.add(t);
+                }
+            }
+
+            float yTolerance = Math.max(18f * density, screenH * 0.024f);
+            List<RowCandidate> rows = new ArrayList<>();
+
+            for (Token fare : fares) {
+                Token pickup = nearestSameRow(fare, pickups, yTolerance);
+                Token trip = nearestSameRow(fare, trips, yTolerance);
+                if (pickup == null || trip == null) continue;
+
+                int top = Math.max(
+                        0,
+                        Math.min(fare.box.top, Math.min(pickup.box.top, trip.box.top))
+                                - Math.round(16f * density));
+                rows.add(new RowCandidate(fare, pickup, trip, top));
+            }
+
+            rows.sort(Comparator.comparingInt(r -> r.top));
+            List<RowCandidate> deduped = new ArrayList<>();
+            for (RowCandidate row : rows) {
+                if (!deduped.isEmpty()) {
+                    RowCandidate prev = deduped.get(deduped.size() - 1);
+                    if (Math.abs(row.top - prev.top) < 26f * density) {
+                        continue;
                     }
                 }
+                deduped.add(row);
             }
 
-            float yTolerance = Math.max(26f * density, screenH * 0.032f);
-            List<Order> candidates = new ArrayList<>();
-
-            for (Token fare : tokens) {
-                if (!isFare(fare, screenW)) continue;
-                List<Token> kms = new ArrayList<>();
-                for (Token t : tokens) {
-                    if (t == fare) continue;
-                    if (t.cx() <= screenW * 0.28f) continue;
-                    if (Math.abs(t.cy() - fare.cy()) > yTolerance) continue;
-                    if (t.value < 0 || t.value >= 500) continue;
-                    kms.add(t);
-                }
-                kms.sort(Comparator.comparingDouble(Token::cx));
-                if (kms.size() < 2) continue;
-
-                Token pickup = kms.get(0);
-                Token trip = kms.get(1);
-                if (pickup.cx() > screenW * 0.72f) continue;
-                if (trip.cx() < screenW * 0.48f || trip.cx() > screenW * 0.92f) continue;
-                if (pickup.value >= 200 || trip.value <= 0) continue;
-
-                int top = Math.max(0, Math.min(fare.box.top, Math.min(pickup.box.top, trip.box.top)) - Math.round(12f * density));
-                int bottom = Math.min(screenH, top + Math.round(150f * density));
-                candidates.add(new Order(fare.value, pickup.value, trip.value, new Rect(0, top, screenW, bottom)));
-            }
-
-            candidates.sort(Comparator.comparingInt(o -> o.bounds.top));
             List<Order> out = new ArrayList<>();
-            int lastTop = -100000;
-            for (int i = 0; i < candidates.size(); i++) {
-                Order o = candidates.get(i);
-                if (Math.abs(o.bounds.top - lastTop) < 35f * density) continue;
-                int nextTop = i + 1 < candidates.size() ? candidates.get(i + 1).bounds.top : o.bounds.bottom;
-                int minimumBottom = o.bounds.top + Math.round(88f * density);
-                int bottom = Math.max(minimumBottom, Math.min(o.bounds.bottom, nextTop - Math.round(4f * density)));
-                out.add(new Order(o.fare, o.pickupKm, o.tripKm, new Rect(0, o.bounds.top, screenW, bottom)));
-                lastTop = o.bounds.top;
+            for (int i = 0; i < deduped.size(); i++) {
+                RowCandidate row = deduped.get(i);
+                int top = row.top;
+                int nextTop = i + 1 < deduped.size()
+                        ? deduped.get(i + 1).top
+                        : screenH;
+                int preferredBottom = top + Math.round(155f * density);
+                int bottom = Math.min(screenH, preferredBottom);
+                if (i + 1 < deduped.size()) {
+                    bottom = Math.min(bottom, nextTop - Math.round(8f * density));
+                }
+                if (bottom <= top + Math.round(72f * density)) {
+                    bottom = Math.min(screenH, top + Math.round(110f * density));
+                }
+
+                out.add(new Order(
+                        row.fare.value,
+                        row.pickup.value,
+                        row.trip.value,
+                        new Rect(0, top, screenW, bottom)));
             }
             return out;
         }
 
-        private static boolean isFare(Token t, int screenW) {
-            if (t.cx() > screenW * 0.30f) return false;
-            if (t.value < 20 || t.value > 10000) return false;
-            String s = t.raw.toLowerCase(Locale.ROOT);
-            if (s.contains("₴") || s.contains("грн") || s.contains("uah")) return true;
-            return Math.abs(t.value - Math.rint(t.value)) < 0.001 && t.value >= 40;
+        private static List<Token> collectTokens(Text result) {
+            List<Token> tokens = new ArrayList<>();
+            for (Text.TextBlock block : result.getTextBlocks()) {
+                for (Text.Line line : block.getLines()) {
+                    for (Text.Element element : line.getElements()) {
+                        Rect box = element.getBoundingBox();
+                        if (box == null) continue;
+                        Matcher m = NUMBER.matcher(element.getText());
+                        while (m.find()) {
+                            try {
+                                double value = Double.parseDouble(
+                                        m.group(1).replace(',', '.'));
+                                tokens.add(new Token(element.getText(), value, box));
+                            } catch (Exception ignored) {
+                            }
+                        }
+                    }
+                }
+            }
+            return tokens;
+        }
+
+        private static Token nearestSameRow(Token base, List<Token> candidates, float tolerance) {
+            Token best = null;
+            float bestDy = Float.MAX_VALUE;
+            for (Token t : candidates) {
+                float dy = Math.abs(t.cy() - base.cy());
+                if (dy <= tolerance && dy < bestDy) {
+                    bestDy = dy;
+                    best = t;
+                }
+            }
+            return best;
         }
     }
 
@@ -458,16 +600,23 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         private final SharedPreferences prefs;
         private final List<Order> orders = new ArrayList<>();
         private final Paint background = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint border = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mainText = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint subText = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final float density;
+        private final float scaledDensity;
 
         ProfitOverlay(Service context, SharedPreferences prefs) {
             super(context);
             this.prefs = prefs;
             density = getResources().getDisplayMetrics().density;
-            text.setTypeface(android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD));
-            border.setStyle(Paint.Style.STROKE);
+            scaledDensity = getResources().getDisplayMetrics().scaledDensity;
+            setWillNotDraw(false);
+            mainText.setTypeface(android.graphics.Typeface.create(
+                    android.graphics.Typeface.DEFAULT,
+                    android.graphics.Typeface.BOLD));
+            subText.setTypeface(android.graphics.Typeface.create(
+                    android.graphics.Typeface.DEFAULT,
+                    android.graphics.Typeface.BOLD));
         }
 
         void setOrders(List<Order> newOrders) {
@@ -479,50 +628,93 @@ public class CaptureService extends Service implements SharedPreferences.OnShare
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            boolean detailed = prefs.getBoolean(MainActivity.DETAILED, false);
+            boolean detailed = prefs.getBoolean(MainActivity.DETAILED, true);
 
             for (Order order : orders) {
                 Result r = calculate(order, prefs);
                 Rect card = order.bounds;
-                if (card.height() < 45f * density) continue;
+                if (card.width() <= 0 || card.height() <= 0) continue;
 
-                float margin = 5f * density;
-                float boxWidth = Math.min(card.width() * 0.58f, 305f * density);
-                float boxHeight = (detailed ? 64f : 46f) * density;
-                float left = Math.max(card.left + margin, card.right - boxWidth - margin);
-                float top = Math.min(card.bottom - boxHeight - margin, card.top + 35f * density);
-                if (top < card.top + margin) top = card.top + margin;
-                RectF box = new RectF(left, top, card.right - margin, Math.min(card.bottom - margin, top + boxHeight));
+                float boxWidth = Math.min(card.width() * 0.58f, 310f * density);
+                float boxHeight = (detailed ? 82f : 62f) * density;
+                float margin = 7f * density;
 
-                int accent = r.incomplete
-                        ? Color.rgb(90, 95, 105)
-                        : (r.acceptable ? Color.rgb(12, 135, 73) : Color.rgb(185, 44, 44));
-                background.setColor(Color.argb(226, 24, 29, 34));
-                border.setColor(accent);
-                border.setStrokeWidth(2.2f * density);
-                canvas.drawRoundRect(box, 10f * density, 10f * density, background);
-                canvas.drawRoundRect(box, 10f * density, 10f * density, border);
+                float left = card.right - boxWidth - margin;
+                float right = card.right - margin;
+                float top = card.top + 48f * density;
+                float bottom = top + boxHeight;
 
-                text.setColor(Color.WHITE);
-                float pad = 8f * density;
-                float y = box.top + 16f * density;
-                text.setTextSize(11.5f * density);
+                if (bottom > card.bottom - margin) {
+                    bottom = card.bottom - margin;
+                    top = bottom - boxHeight;
+                }
+                if (top < card.top + margin) {
+                    top = card.top + margin;
+                    bottom = Math.min(card.bottom - margin, top + boxHeight);
+                }
+                if (bottom - top < 48f * density) continue;
 
                 if (r.incomplete) {
-                    canvas.drawText(String.format(Locale.US, "%.2f км • вкажи розхід", r.totalKm), box.left + pad, y, text);
-                    y += 17f * density;
-                    text.setTextSize(10.5f * density);
-                    canvas.drawText(String.format(Locale.US, "₴%.0f • %.2f + %.2f км", order.fare, order.pickupKm, order.tripKm), box.left + pad, y, text);
+                    background.setColor(Color.argb(242, 78, 82, 88));
+                } else if (r.netProfit < 0) {
+                    background.setColor(Color.argb(242, 158, 42, 42));
+                } else if (r.targetConfigured && !r.acceptable) {
+                    background.setColor(Color.argb(242, 175, 105, 15));
                 } else {
-                    canvas.drawText(String.format(Locale.US, "ЧИСТО %.0f₴ • %.1f₴/км", r.netProfit, r.netPerKm), box.left + pad, y, text);
-                    y += 17f * density;
-                    text.setTextSize(10.2f * density);
-                    canvas.drawText(String.format(Locale.US, "Σ %.2f км • витрати %.0f₴", r.totalKm, r.totalCost), box.left + pad, y, text);
-                    if (detailed && box.height() > 55f * density) {
-                        y += 15f * density;
-                        text.setTextSize(9.5f * density);
-                        canvas.drawText(String.format(Locale.US, "пал %.0f • ком %.0f • аморт %.0f", r.fuelCost, r.serviceCommission + r.transferCommission, r.amortization), box.left + pad, y, text);
-                    }
+                    background.setColor(Color.argb(242, 0, 112, 72));
+                }
+
+                RectF box = new RectF(left, top, right, bottom);
+                canvas.drawRoundRect(box, 10f * density, 10f * density, background);
+
+                float x = left + 10f * density;
+                float y = top + 21f * density;
+                mainText.setColor(Color.WHITE);
+                subText.setColor(Color.WHITE);
+
+                if (r.incomplete) {
+                    mainText.setTextSize(14.5f * scaledDensity);
+                    canvas.drawText("ВКАЖИ РОЗХІД ПАЛИВА", x, y, mainText);
+                    y += 20f * density;
+                    subText.setTextSize(11.5f * scaledDensity);
+                    canvas.drawText("у налаштуваннях додатка", x, y, subText);
+                    continue;
+                }
+
+                mainText.setTextSize(15.5f * scaledDensity);
+                canvas.drawText(
+                        String.format(Locale.US,
+                                "ЧИСТО %.0f ₴  •  %.1f ₴/км",
+                                r.netProfit,
+                                r.netPerKm),
+                        x,
+                        y,
+                        mainText);
+
+                y += 21f * density;
+                subText.setTextSize(12.0f * scaledDensity);
+                canvas.drawText(
+                        String.format(Locale.US,
+                                "ВИТРАТИ %.0f ₴  •  Σ %.2f км",
+                                r.totalCost,
+                                r.totalKm),
+                        x,
+                        y,
+                        subText);
+
+                if (detailed && bottom - top >= 74f * density) {
+                    y += 19f * density;
+                    subText.setTextSize(10.8f * scaledDensity);
+                    canvas.drawText(
+                            String.format(Locale.US,
+                                    "Паливо %.0f • Комісії %.0f • Аморт. %.0f • Інші %.0f",
+                                    r.fuelCost,
+                                    r.serviceCommission + r.transferCommission,
+                                    r.amortization,
+                                    r.fixedCost),
+                            x,
+                            y,
+                            subText);
                 }
             }
         }
