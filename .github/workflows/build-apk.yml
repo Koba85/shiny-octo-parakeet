@@ -1,0 +1,41 @@
+name: Build Taxi838Overlay APK
+
+on:
+  push:
+    paths:
+      - 'android/Taxi838Overlay/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: android/Taxi838Overlay
+        run: gradle --no-daemon assembleDebug
+
+      - name: Prepare APK
+        run: cp android/Taxi838Overlay/app/build/outputs/apk/debug/app-debug.apk Taxi838Overlay.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Taxi838Overlay-APK
+          path: Taxi838Overlay.apk
+          if-no-files-found: error
+          retention-days: 7
