@@ -1,15 +1,18 @@
 package ua.kobets.taxi838overlay;
 
+import android.Manifest;
 import android.app.Activity;
-import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.TextUtils;
-import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -30,11 +33,12 @@ public class MainActivity extends Activity {
     public static final String FIXED_ORDER_COST = "fixed_order_cost";
     public static final String MIN_PROFIT = "min_profit";
     public static final String MIN_PROFIT_KM = "min_profit_km";
-    public static final String TARGET_PACKAGE = "target_package";
+
+    private static final int REQ_CAPTURE = 8380;
+    private static final int REQ_NOTIFICATIONS = 8381;
 
     private SharedPreferences prefs;
     private TextView statusText;
-    private TextView targetText;
     private CheckBox enabledBox;
     private CheckBox detailedBox;
     private EditText fuelPrice;
@@ -54,27 +58,36 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(16), dp(18), dp(30));
+        root.setPadding(dp(18), dp(16), dp(18), dp(32));
         scroll.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
-        TextView title = text("838 • миттєвий розрахунок", 24, true);
-        root.addView(title);
-
-        TextView intro = text("Розрахунок з’являється поверх кожної видимої заявки 838. Подача + маршрут враховуються як повний пробіг.", 14, false);
+        root.addView(text("838 • миттєвий розрахунок", 24, true));
+        TextView intro = text("Без спецможливостей: локально зчитує ціну, подачу та маршрут з екрана 838 і накладає розрахунок поверх заявки.", 14, false);
         intro.setPadding(0, dp(6), 0, dp(10));
         root.addView(intro);
 
         statusText = text("", 15, true);
         root.addView(statusText);
 
-        Button accessButton = button("Увімкнути / перевірити спецможливості");
-        accessButton.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        root.addView(accessButton);
+        Button overlayPermission = button("1. Дозволити показ поверх програм");
+        overlayPermission.setOnClickListener(v -> openOverlayPermission());
+        root.addView(overlayPermission);
+
+        Button start = button("2. Запустити аналіз 838");
+        start.setOnClickListener(v -> startScanner());
+        root.addView(start);
+
+        Button stop = button("Зупинити аналіз");
+        stop.setOnClickListener(v -> {
+            stopService(new Intent(this, CaptureService.class));
+            Toast.makeText(this, "Аналіз зупинено", Toast.LENGTH_SHORT).show();
+        });
+        root.addView(stop);
 
         enabledBox = new CheckBox(this);
-        enabledBox.setText("Показувати розрахунок поверх 838");
+        enabledBox.setText("Показувати розрахунок");
         enabledBox.setTextSize(15);
         enabledBox.setChecked(prefs.getBoolean(ENABLED, true));
         root.addView(enabledBox);
@@ -82,7 +95,7 @@ public class MainActivity extends Activity {
         detailedBox = new CheckBox(this);
         detailedBox.setText("Детально: паливо / комісії / амортизація");
         detailedBox.setTextSize(15);
-        detailedBox.setChecked(prefs.getBoolean(DETAILED, true));
+        detailedBox.setChecked(prefs.getBoolean(DETAILED, false));
         root.addView(detailedBox);
 
         TextView section = text("Змінні розрахунку", 19, true);
@@ -107,27 +120,12 @@ public class MainActivity extends Activity {
         root.addView(minProfit);
         root.addView(minProfitKm);
 
-        Button saveButton = button("Зберегти налаштування");
-        saveButton.setOnClickListener(v -> save());
-        root.addView(saveButton);
+        Button save = button("Зберегти налаштування");
+        save.setOnClickListener(v -> saveSettings());
+        root.addView(save);
 
-        TextView bindSection = text("Прив’язка до 838", 19, true);
-        bindSection.setPadding(0, dp(16), 0, dp(4));
-        root.addView(bindSection);
-
-        targetText = text("", 14, false);
-        root.addView(targetText);
-
-        Button reset = button("Скинути автовизначення 838");
-        reset.setOnClickListener(v -> {
-            prefs.edit().remove(TARGET_PACKAGE).apply();
-            refreshStatus();
-            Toast.makeText(this, "Прив’язку скинуто. Тепер відкрий список заявок 838.", Toast.LENGTH_LONG).show();
-        });
-        root.addView(reset);
-
-        TextView help = text("Перший запуск: 1) увімкни сервіс у спецможливостях; 2) повернись у 838; 3) відкрий список, де видно щонайменше дві заявки з ціною, подачею та кілометражем маршруту. Додаток автоматично запам’ятає пакет 838.", 13, false);
-        help.setPadding(0, dp(10), 0, 0);
+        TextView help = text("Після натискання «Запустити» Android один раз на запуск покаже стандартне вікно дозволу на захоплення екрана. Далі відкрий 838 — розрахунок оновлюється автоматично.", 13, false);
+        help.setPadding(0, dp(12), 0, 0);
         help.setTextColor(Color.DKGRAY);
         root.addView(help);
 
@@ -139,6 +137,74 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refreshStatus();
+    }
+
+    private void startScanner() {
+        saveSettings();
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Спочатку дозволь показ поверх інших програм", Toast.LENGTH_LONG).show();
+            openOverlayPermission();
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
+        }
+        MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
+    }
+
+    private void openOverlayPermission() {
+        if (Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Дозвіл уже надано", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
+        startActivity(i);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_CAPTURE) return;
+        if (resultCode != RESULT_OK || data == null) {
+            Toast.makeText(this, "Захоплення екрана не дозволено", Toast.LENGTH_LONG).show();
+            return;
+        }
+        Intent service = new Intent(this, CaptureService.class);
+        service.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
+        service.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
+        Toast.makeText(this, "Аналіз запущено. Відкрий 838.", Toast.LENGTH_LONG).show();
+        moveTaskToBack(true);
+    }
+
+    private void saveSettings() {
+        prefs.edit()
+                .putBoolean(ENABLED, enabledBox.isChecked())
+                .putBoolean(DETAILED, detailedBox.isChecked())
+                .putString(FUEL_PRICE, clean(fuelPrice))
+                .putString(CITY_CONSUMPTION, clean(cityConsumption))
+                .putString(SERVICE_COMMISSION, clean(serviceCommission))
+                .putString(TRANSFER_COMMISSION, clean(transferCommission))
+                .putString(AMORTIZATION_KM, clean(amortizationKm))
+                .putString(FIXED_ORDER_COST, clean(fixedOrderCost))
+                .putString(MIN_PROFIT, clean(minProfit))
+                .putString(MIN_PROFIT_KM, clean(minProfitKm))
+                .apply();
+    }
+
+    private String clean(EditText e) {
+        String s = e.getText().toString().trim().replace(',', '.');
+        return TextUtils.isEmpty(s) ? "0" : s;
+    }
+
+    private void refreshStatus() {
+        if (statusText == null) return;
+        boolean overlay = Settings.canDrawOverlays(this);
+        statusText.setText(overlay
+                ? "Показ поверх програм: ДОЗВОЛЕНО"
+                : "Показ поверх програм: НЕ ДОЗВОЛЕНО");
+        statusText.setTextColor(overlay ? Color.rgb(0, 120, 70) : Color.rgb(180, 60, 30));
     }
 
     private TextView text(String value, int sp, boolean bold) {
@@ -169,55 +235,6 @@ public class MainActivity extends Activity {
         e.setText(value);
         e.setTextSize(16);
         return e;
-    }
-
-    private void save() {
-        prefs.edit()
-                .putBoolean(ENABLED, enabledBox.isChecked())
-                .putBoolean(DETAILED, detailedBox.isChecked())
-                .putString(FUEL_PRICE, clean(fuelPrice))
-                .putString(CITY_CONSUMPTION, clean(cityConsumption))
-                .putString(SERVICE_COMMISSION, clean(serviceCommission))
-                .putString(TRANSFER_COMMISSION, clean(transferCommission))
-                .putString(AMORTIZATION_KM, clean(amortizationKm))
-                .putString(FIXED_ORDER_COST, clean(fixedOrderCost))
-                .putString(MIN_PROFIT, clean(minProfit))
-                .putString(MIN_PROFIT_KM, clean(minProfitKm))
-                .apply();
-        Toast.makeText(this, "Збережено", Toast.LENGTH_SHORT).show();
-        refreshStatus();
-    }
-
-    private String clean(EditText e) {
-        String s = e.getText().toString().trim().replace(',', '.');
-        return TextUtils.isEmpty(s) ? "0" : s;
-    }
-
-    private void refreshStatus() {
-        if (statusText == null || targetText == null) return;
-        boolean enabled = isServiceEnabled();
-        statusText.setText(enabled ? "Сервіс спецможливостей: УВІМКНЕНО" : "Сервіс спецможливостей: ВИМКНЕНО");
-        statusText.setTextColor(enabled ? Color.rgb(0, 120, 70) : Color.rgb(180, 60, 30));
-
-        String target = prefs.getString(TARGET_PACKAGE, "");
-        if (target == null || target.isEmpty()) {
-            targetText.setText("Пакет 838 ще не визначено. Відкрий екран заявок 838 після ввімкнення сервісу.");
-        } else {
-            targetText.setText("Визначений пакет 838: " + target);
-        }
-    }
-
-    private boolean isServiceEnabled() {
-        String enabledServices = Settings.Secure.getString(
-                getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        if (enabledServices == null) return false;
-        ComponentName component = new ComponentName(this, OrderAccessibilityService.class);
-        String full = component.flattenToString();
-        String shortName = component.flattenToShortString();
-        for (String item : enabledServices.split(":")) {
-            if (item.equalsIgnoreCase(full) || item.equalsIgnoreCase(shortName)) return true;
-        }
-        return false;
     }
 
     private int dp(int value) {
