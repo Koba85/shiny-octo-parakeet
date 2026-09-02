@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">838 Profit Overlay</string>
+    <string name="accessibility_description">Зчитує видимі заявки 838 з екрана та показує локальний розрахунок витрат і прибутку поверх карток. Дані нікуди не передаються.</string>
+</resources>
