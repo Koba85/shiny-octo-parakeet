@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
+import android.graphics.Typeface;
 import android.media.projection.MediaProjectionManager;
 import android.net.Uri;
 import android.os.Build;
@@ -13,6 +14,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
 import android.text.TextUtils;
+import android.view.View;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
@@ -56,76 +58,120 @@ public class MainActivity extends Activity {
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
 
         ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(16), dp(18), dp(32));
+        root.setPadding(dp(18), dp(14), dp(18), dp(36));
         scroll.addView(root, new ScrollView.LayoutParams(
                 ScrollView.LayoutParams.MATCH_PARENT,
                 ScrollView.LayoutParams.WRAP_CONTENT));
 
-        root.addView(text("838 • миттєвий розрахунок", 24, true));
-        TextView intro = text("Без спецможливостей: локально зчитує ціну, подачу та маршрут з екрана 838 і накладає розрахунок поверх заявки.", 14, false);
-        intro.setPadding(0, dp(6), 0, dp(10));
+        root.addView(text("838 • розрахунок заявки", 25, true));
+        TextView intro = text(
+                "З 838 автоматично зчитуються: ЦІНА ЗАЯВКИ, КМ ДО ПОДАЧІ та КМ МАРШРУТУ. Нижче вводяться тільки твої витрати.",
+                15, false);
+        intro.setPadding(0, dp(6), 0, dp(12));
         root.addView(intro);
 
         statusText = text("", 15, true);
+        statusText.setPadding(0, 0, 0, dp(6));
         root.addView(statusText);
 
-        Button overlayPermission = button("1. Дозволити показ поверх програм");
+        Button overlayPermission = button("1. ДОЗВОЛИТИ ПОКАЗ ПОВЕРХ 838");
         overlayPermission.setOnClickListener(v -> openOverlayPermission());
         root.addView(overlayPermission);
 
-        Button start = button("2. Запустити аналіз 838");
+        Button start = button("2. ЗАПУСТИТИ РОЗРАХУНОК 838");
         start.setOnClickListener(v -> startScanner());
         root.addView(start);
 
-        Button stop = button("Зупинити аналіз");
+        Button stop = button("ЗУПИНИТИ РОЗРАХУНОК");
         stop.setOnClickListener(v -> {
             stopService(new Intent(this, CaptureService.class));
-            Toast.makeText(this, "Аналіз зупинено", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "Розрахунок зупинено", Toast.LENGTH_SHORT).show();
         });
         root.addView(stop);
 
         enabledBox = new CheckBox(this);
-        enabledBox.setText("Показувати розрахунок");
-        enabledBox.setTextSize(15);
+        enabledBox.setText("Показувати блок розрахунку на заявках");
+        enabledBox.setTextSize(16);
         enabledBox.setChecked(prefs.getBoolean(ENABLED, true));
         root.addView(enabledBox);
 
         detailedBox = new CheckBox(this);
-        detailedBox.setText("Детально: паливо / комісії / амортизація");
-        detailedBox.setTextSize(15);
-        detailedBox.setChecked(prefs.getBoolean(DETAILED, false));
+        detailedBox.setText("Показувати деталізацію витрат у блоці");
+        detailedBox.setTextSize(16);
+        detailedBox.setChecked(prefs.getBoolean(DETAILED, true));
         root.addView(detailedBox);
 
-        TextView section = text("Змінні розрахунку", 19, true);
-        section.setPadding(0, dp(14), 0, dp(4));
+        TextView section = text("ТВОЇ ЗМІННІ ДЛЯ РОЗРАХУНКУ", 20, true);
+        section.setPadding(0, dp(14), 0, dp(6));
         root.addView(section);
 
-        fuelPrice = numberField("Ціна бензину, грн/л", prefs.getString(FUEL_PRICE, "80"));
-        cityConsumption = numberField("Розхід місто, л/100 км", prefs.getString(CITY_CONSUMPTION, "0"));
-        serviceCommission = numberField("Комісія 838, %", prefs.getString(SERVICE_COMMISSION, "0"));
-        transferCommission = numberField("Комісія переказу/виводу, %", prefs.getString(TRANSFER_COMMISSION, "0"));
-        amortizationKm = numberField("Амортизація, грн/км", prefs.getString(AMORTIZATION_KM, "0"));
-        fixedOrderCost = numberField("Інші витрати, грн/замовлення", prefs.getString(FIXED_ORDER_COST, "0"));
-        minProfit = numberField("Мінімальний чистий прибуток, грн", prefs.getString(MIN_PROFIT, "0"));
-        minProfitKm = numberField("Мінімальний чистий прибуток, грн/км", prefs.getString(MIN_PROFIT_KM, "0"));
+        fuelPrice = addNumberField(root,
+                "1. Ціна бензину",
+                "грн за 1 літр",
+                prefs.getString(FUEL_PRICE, "80"));
 
-        root.addView(fuelPrice);
-        root.addView(cityConsumption);
-        root.addView(serviceCommission);
-        root.addView(transferCommission);
-        root.addView(amortizationKm);
-        root.addView(fixedOrderCost);
-        root.addView(minProfit);
-        root.addView(minProfitKm);
+        cityConsumption = addNumberField(root,
+                "2. Розхід палива по місту",
+                "літрів на 100 км. Без цього паливо порахувати неможливо",
+                prefs.getString(CITY_CONSUMPTION, "0"));
 
-        Button save = button("Зберегти налаштування");
-        save.setOnClickListener(v -> saveSettings());
+        serviceCommission = addNumberField(root,
+                "3. Комісія служби 838",
+                "% від вартості заявки",
+                prefs.getString(SERVICE_COMMISSION, "0"));
+
+        transferCommission = addNumberField(root,
+                "4. Комісія за виведення / переказ",
+                "% від вартості заявки. Якщо немає — залиш 0",
+                prefs.getString(TRANSFER_COMMISSION, "0"));
+
+        amortizationKm = addNumberField(root,
+                "5. Амортизація автомобіля",
+                "грн на 1 км повного пробігу",
+                prefs.getString(AMORTIZATION_KM, "0"));
+
+        fixedOrderCost = addNumberField(root,
+                "6. Фіксовані витрати на одну заявку",
+                "грн на замовлення. Якщо немає — залиш 0",
+                prefs.getString(FIXED_ORDER_COST, "0"));
+
+        minProfit = addNumberField(root,
+                "7. Мінімальний бажаний чистий прибуток",
+                "грн із заявки. Використовується для оцінки вигідності",
+                prefs.getString(MIN_PROFIT, "0"));
+
+        minProfitKm = addNumberField(root,
+                "8. Мінімальний бажаний чистий прибуток на 1 км",
+                "грн/км. Використовується для оцінки вигідності",
+                prefs.getString(MIN_PROFIT_KM, "0"));
+
+        Button save = button("ЗБЕРЕГТИ НАЛАШТУВАННЯ");
+        save.setOnClickListener(v -> {
+            saveSettings();
+            Toast.makeText(this, "Налаштування збережено", Toast.LENGTH_SHORT).show();
+        });
         root.addView(save);
 
-        TextView help = text("Після натискання «Запустити» Android один раз на запуск покаже стандартне вікно дозволу на захоплення екрана. Далі відкрий 838 — розрахунок оновлюється автоматично.", 13, false);
-        help.setPadding(0, dp(12), 0, 0);
+        TextView formulaTitle = text("ЩО БУДЕ ПОКАЗАНО НА ЗАЯВЦІ", 18, true);
+        formulaTitle.setPadding(0, dp(18), 0, dp(4));
+        root.addView(formulaTitle);
+
+        TextView formula = text(
+                "• повний пробіг = подача + маршрут\n" +
+                "• паливо, комісія 838, амортизація та загальні витрати\n" +
+                "• чистий прибуток у грн\n" +
+                "• чистий прибуток у грн/км",
+                14, false);
+        formula.setLineSpacing(0, 1.12f);
+        root.addView(formula);
+
+        TextView help = text(
+                "Після «Запустити» Android покаже штатний дозвіл на захоплення екрана. Далі відкрий список заявок 838. Розпізнавання виконується локально на телефоні.",
+                13, false);
+        help.setPadding(0, dp(14), 0, 0);
         help.setTextColor(Color.DKGRAY);
         root.addView(help);
 
@@ -139,6 +185,32 @@ public class MainActivity extends Activity {
         refreshStatus();
     }
 
+    private EditText addNumberField(LinearLayout root, String label, String note, String value) {
+        TextView title = text(label, 16, true);
+        title.setPadding(0, dp(10), 0, 0);
+        root.addView(title);
+
+        TextView sub = text(note, 12, false);
+        sub.setTextColor(Color.rgb(85, 85, 85));
+        sub.setPadding(0, dp(1), 0, 0);
+        root.addView(sub);
+
+        EditText field = new EditText(this);
+        field.setSingleLine(true);
+        field.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
+        field.setText(value);
+        field.setTextSize(20);
+        field.setSelectAllOnFocus(true);
+        field.setPadding(dp(8), dp(5), dp(8), dp(5));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(48));
+        lp.setMargins(0, dp(3), 0, dp(2));
+        field.setLayoutParams(lp);
+        root.addView(field);
+        return field;
+    }
+
     private void startScanner() {
         saveSettings();
         if (!Settings.canDrawOverlays(this)) {
@@ -146,10 +218,12 @@ public class MainActivity extends Activity {
             openOverlayPermission();
             return;
         }
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS);
         }
-        MediaProjectionManager mpm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager mpm =
+                (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         startActivityForResult(mpm.createScreenCaptureIntent(), REQ_CAPTURE);
     }
 
@@ -158,7 +232,9 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "Дозвіл уже надано", Toast.LENGTH_SHORT).show();
             return;
         }
-        Intent i = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()));
+        Intent i = new Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName()));
         startActivity(i);
     }
 
@@ -174,7 +250,7 @@ public class MainActivity extends Activity {
         service.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
         service.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(service); else startService(service);
-        Toast.makeText(this, "Аналіз запущено. Відкрий 838.", Toast.LENGTH_LONG).show();
+        Toast.makeText(this, "Розрахунок запущено. Відкрий 838.", Toast.LENGTH_LONG).show();
         moveTaskToBack(true);
     }
 
@@ -202,9 +278,9 @@ public class MainActivity extends Activity {
         if (statusText == null) return;
         boolean overlay = Settings.canDrawOverlays(this);
         statusText.setText(overlay
-                ? "Показ поверх програм: ДОЗВОЛЕНО"
-                : "Показ поверх програм: НЕ ДОЗВОЛЕНО");
-        statusText.setTextColor(overlay ? Color.rgb(0, 120, 70) : Color.rgb(180, 60, 30));
+                ? "Показ поверх 838: ДОЗВОЛЕНО"
+                : "Показ поверх 838: НЕ ДОЗВОЛЕНО");
+        statusText.setTextColor(overlay ? Color.rgb(0, 125, 75) : Color.rgb(190, 55, 35));
     }
 
     private TextView text(String value, int sp, boolean bold) {
@@ -212,29 +288,20 @@ public class MainActivity extends Activity {
         t.setText(value);
         t.setTextSize(sp);
         t.setTextColor(Color.rgb(25, 25, 25));
-        if (bold) t.setTypeface(t.getTypeface(), android.graphics.Typeface.BOLD);
+        if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         return t;
     }
 
     private Button button(String label) {
         Button b = new Button(this);
         b.setText(label);
+        b.setTextSize(15);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
-        lp.setMargins(0, dp(7), 0, dp(3));
+        lp.setMargins(0, dp(6), 0, dp(2));
         b.setLayoutParams(lp);
         return b;
-    }
-
-    private EditText numberField(String hint, String value) {
-        EditText e = new EditText(this);
-        e.setHint(hint);
-        e.setSingleLine(true);
-        e.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_DECIMAL);
-        e.setText(value);
-        e.setTextSize(16);
-        return e;
     }
 
     private int dp(int value) {
