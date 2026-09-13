@@ -8,13 +8,9 @@ android {
 
     defaultConfig {
         applicationId 'ua.koba.taxi838overlay.v3'
-        minSdk 30
+        minSdk 23
         targetSdk 35
         versionCode 3
         versionName '3.0'
     }
-}
-
-dependencies {
-    implementation 'com.google.mlkit:text-recognition:16.0.1'
 }
