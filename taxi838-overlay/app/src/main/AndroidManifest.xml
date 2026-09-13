@@ -3,7 +3,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="838 Аналізатор"
+        android:label="838 Аналізатор v2"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
@@ -19,7 +19,7 @@
         <service
             android:name=".OrderAccessibilityService"
             android:exported="true"
-            android:label="838 Аналізатор заявок"
+            android:label="838 Аналізатор заявок v2"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
